@@ -2,16 +2,21 @@ from flask import Flask, jsonify, request
 from googleapiclient.discovery import build
 import sqlite3
 import time
+import json
 import threading
 
 app = Flask(__name__)
 
 YOUTUBE_SEARCH_WORD = "cricket"
-API_KEY = "AIzaSyDTFGFkwpbaxoEUxlzCJUyo6awrWr7fKnU"
-UPDATE_FREQUENCY_IN_SECONDS = 30
+API_KEY_ARRAY = [
+    "AIzaSyB7G1_mJMk_8q6DpPPPLdsZYq_WogmGHJI",
+    "AIzaSyCJCIpiSPOwjcaXzZ4Ab2-lBjjsaIhFd4w",
+    "AIzaSyB5V6g7I8P3zIHGwGmLl6rbz7bwRKPnrpM",
+    "AIzaSyAsYaBtsFnvwnSdNBvTj8z2O93ypmdulAw",
+]
+UPDATE_FREQUENCY_IN_SECONDS = 10
 API_PAGE_SIZE = 10
 DATABASE_FILE_NAME = "videos.db"
-next_page_token = ""
 
 
 def get_query_offset(page_param):
@@ -40,9 +45,16 @@ def get_videos():
         result = []
         offset = get_query_offset(request.args.get("page"))
         for row in curr.execute(
-            f"SELECT title, description, thumbnail_url, datetime(published_at) FROM youtube ORDER BY datetime(published_at) DESC LIMIT {API_PAGE_SIZE} OFFSET {offset}"
+            f"SELECT title, description, thumbnail_url, datetime(published_at), video_id FROM youtube ORDER BY datetime(published_at) DESC LIMIT {API_PAGE_SIZE} OFFSET {offset}"
         ):
-            result.append(row)
+            title, description, thumbnail_url, published_at, video_id = row
+            dict = {}
+            dict["title"] = title
+            dict["description"] = description
+            dict["thumbnail_url"] = thumbnail_url
+            dict["published_at"] = published_at
+            result.append(dict)
+
         return jsonify(code=200, result=result)
     except Exception as e:
         return jsonify(code=500, result="internal server error")
@@ -62,21 +74,20 @@ def search_the_database(query, offset):
     curr = conn.cursor()
     result = []
     curr.execute(
-        f"SELECT title, description, thumbnail_url, datetime(published_at) from youtube WHERE title LIKE '%{query}%' OR  description LIKE '%{query}%' ORDER BY datetime(published_at) DESC LIMIT {API_PAGE_SIZE} OFFSET {offset}"
+        f"SELECT title, description, thumbnail_url, datetime(published_at), video_id from youtube WHERE title LIKE '%{query}%' OR  description LIKE '%{query}%' ORDER BY datetime(published_at) DESC LIMIT {API_PAGE_SIZE} OFFSET {offset}"
     )
     conn.commit()
     rows_desc = curr.fetchall()
     conn.commit()
     result = []
     for row in rows_desc:
-        title, description, thumbnail_url, published_at = row
+        title, description, thumbnail_url, published_at, video_id = row
         dict = {}
         dict["title"] = title
         dict["description"] = description
         dict["thumbnail_url"] = thumbnail_url
         dict["published_at"] = published_at
         result.append(dict)
-
     return result
 
 
@@ -102,22 +113,21 @@ def initialise_database():
 
 def fetch_youtube_videos():
     try:
-        # global next_page_token
-        youtube = build("youtube", "v3", developerKey=API_KEY)
+        global CURRENT_API_KEY_INDEX
+        youtube = build(
+            "youtube", "v3", developerKey=API_KEY_ARRAY[CURRENT_API_KEY_INDEX]
+        )
         request = youtube.search().list(
             part="id,snippet",
             order="date",
             publishedAfter="2002-05-01T00:00:00Z",
             q="cricket",
             type="video",
-            # pageToken=next_page_token,
             maxResults=100,
         )
         response = request.execute()
         list_items = []
         list_iter = response["items"]
-        # next_page_token = response["nextPageToken"]
-        # print("next_page_token", next_page_token)
         for items in list_iter:
             tuple_items = (
                 items["snippet"]["title"],
@@ -129,7 +139,31 @@ def fetch_youtube_videos():
             list_items.append(tuple_items)
         return list_items
     except Exception as e:
-        print("ERROR: error occurred while fetching youtube videos: {}".format(e))
+        if check_youtube_quota_error(e):
+            print("ERROR: error occurred while fetching videos, youtube quota error")
+            change_the_api_key()
+        else:
+            print("ERROR: error occurred while fetching youtube videos: {}".format(e))
+
+
+def check_youtube_quota_error(err_obj):
+    errors = json.loads(err_obj.content)["error"]["errors"]
+    is_quota_error = False
+    for err in errors:
+        if err["reason"] == "quotaExceeded":
+            is_quota_error = True
+            break
+    return is_quota_error
+
+
+def change_the_api_key():
+    global CURRENT_API_KEY_INDEX
+    print("INFO: changing API KEY")
+
+    if CURRENT_API_KEY_INDEX == len(API_KEY_ARRAY) - 1:
+        CURRENT_API_KEY_INDEX = 0
+    else:
+        CURRENT_API_KEY_INDEX += 1
 
 
 def fetch_and_save_latest_results():
@@ -178,7 +212,10 @@ if __name__ == "__main__":
 
     PARAMETERS: none
     """
+    global CURRENT_API_KEY_INDEX
+    CURRENT_API_KEY = API_KEY_ARRAY[0]
+    CURRENT_API_KEY_INDEX = 0
     initialise_database()
     print("INFO: Start the background fetch of the youtube videos")
-    # setup_background_fetch()  # start background fetch (asyncio)
+    setup_background_fetch()  # start background fetch (asyncio)
     app.run(debug=True)
